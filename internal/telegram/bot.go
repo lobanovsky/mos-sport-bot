@@ -1,21 +1,37 @@
 package telegram
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
-
-	"mos-sport-bot/internal/store"
 
 	telebot "gopkg.in/telebot.v3"
 )
 
+const helpText = "Слежу за доступностью записи на секциях sport.mos.ru.\n\n" +
+	"/subscribe <url> — подписаться на URL\n" +
+	"/unsubscribe <url> — отписаться от URL\n" +
+	"/list — показать мои подписки\n" +
+	"/status — статус по моим подпискам"
+
 type BroadcastResult struct {
 	Sent   int
 	Failed int
+}
+
+type subscribeRequest struct {
+	ChatID int64  `json:"chat_id"`
+	URL    string `json:"url"`
+}
+
+type subscriptionsResponse struct {
+	URLs []string `json:"urls"`
 }
 
 type backendStatus struct {
@@ -28,15 +44,23 @@ type backendStatus struct {
 	Checks      uint64    `json:"checks"`
 }
 
+type statusResponse struct {
+	Statuses []backendStatus `json:"statuses"`
+}
+
+type errorResponse struct {
+	Error string `json:"error"`
+}
+
 type Bot struct {
 	bot        *telebot.Bot
-	store      *store.Store
-	statusURL  string
+	apiBaseURL string
+	secret     string
 	httpClient *http.Client
 	logger     *slog.Logger
 }
 
-func New(token string, st *store.Store, statusURL string, requestTimeout time.Duration, logger *slog.Logger) (*Bot, error) {
+func New(token, apiBaseURL, secret string, requestTimeout time.Duration, logger *slog.Logger) (*Bot, error) {
 	tb, err := telebot.NewBot(telebot.Settings{
 		Token:  token,
 		Poller: &telebot.LongPoller{Timeout: 10 * time.Second},
@@ -47,14 +71,16 @@ func New(token string, st *store.Store, statusURL string, requestTimeout time.Du
 
 	b := &Bot{
 		bot:        tb,
-		store:      st,
-		statusURL:  statusURL,
+		apiBaseURL: strings.TrimRight(apiBaseURL, "/"),
+		secret:     secret,
 		httpClient: &http.Client{Timeout: requestTimeout},
 		logger:     logger,
 	}
 
 	tb.Handle("/start", b.handleStart)
-	tb.Handle("/stop", b.handleStop)
+	tb.Handle("/subscribe", b.handleSubscribe)
+	tb.Handle("/unsubscribe", b.handleUnsubscribe)
+	tb.Handle("/list", b.handleList)
 	tb.Handle("/status", b.handleStatus)
 
 	return b, nil
@@ -66,9 +92,11 @@ func (b *Bot) Run(ctx context.Context) {
 	b.bot.Stop()
 }
 
-func (b *Bot) Broadcast(ctx context.Context, text string) BroadcastResult {
+// SendTo messages exactly the given chat IDs, supplied by the caller (the
+// webhook handler, on the backend's behalf) rather than any local state.
+func (b *Bot) SendTo(ctx context.Context, chatIDs []int64, text string) BroadcastResult {
 	var result BroadcastResult
-	for _, id := range b.store.List() {
+	for _, id := range chatIDs {
 		if ctx.Err() != nil {
 			return result
 		}
@@ -83,54 +111,149 @@ func (b *Bot) Broadcast(ctx context.Context, text string) BroadcastResult {
 }
 
 func (b *Bot) handleStart(c telebot.Context) error {
-	added, err := b.store.Add(c.Chat().ID)
-	if err != nil {
-		b.logger.Error("subscribe failed", "chat_id", c.Chat().ID, "error", err)
-		return c.Send("⚠️ Не удалось сохранить подписку, попробуйте ещё раз.")
-	}
-	if !added {
-		return c.Send("Вы уже подписаны.")
-	}
-	return c.Send("Вы подписались на уведомления о доступности записи.")
+	return c.Send(helpText)
 }
 
-func (b *Bot) handleStop(c telebot.Context) error {
-	removed, err := b.store.Remove(c.Chat().ID)
+func (b *Bot) handleSubscribe(c telebot.Context) error {
+	args := c.Args()
+	if len(args) != 1 {
+		return c.Send("Укажите ссылку: /subscribe <url>")
+	}
+	url := args[0]
+	status, body, err := b.callAPI(context.Background(), http.MethodPost, "/subscriptions", subscribeRequest{ChatID: c.Chat().ID, URL: url})
 	if err != nil {
-		b.logger.Error("unsubscribe failed", "chat_id", c.Chat().ID, "error", err)
-		return c.Send("⚠️ Не удалось отменить подписку, попробуйте ещё раз.")
+		b.logger.Error("subscribe call failed", "chat_id", c.Chat().ID, "url", url, "error", err)
 	}
-	if !removed {
-		return c.Send("Вы не были подписаны.")
+	return c.Send(subscribeReplyText(status, body, err, url))
+}
+
+func (b *Bot) handleUnsubscribe(c telebot.Context) error {
+	args := c.Args()
+	if len(args) != 1 {
+		return c.Send("Укажите ссылку: /unsubscribe <url>")
 	}
-	return c.Send("Вы отписались от уведомлений.")
+	url := args[0]
+	status, _, err := b.callAPI(context.Background(), http.MethodDelete, "/subscriptions", subscribeRequest{ChatID: c.Chat().ID, URL: url})
+	if err != nil {
+		b.logger.Error("unsubscribe call failed", "chat_id", c.Chat().ID, "url", url, "error", err)
+	}
+	return c.Send(unsubscribeReplyText(status, err, url))
+}
+
+func (b *Bot) handleList(c telebot.Context) error {
+	status, body, err := b.callAPI(context.Background(), http.MethodGet, fmt.Sprintf("/subscriptions?chat_id=%d", c.Chat().ID), nil)
+	if err != nil {
+		b.logger.Error("list call failed", "chat_id", c.Chat().ID, "error", err)
+	}
+	return c.Send(listReplyText(status, body, err))
 }
 
 func (b *Bot) handleStatus(c telebot.Context) error {
-	if b.statusURL == "" {
-		return c.Send("⚠️ Команда /status не настроена (не задан BACKEND_STATUS_URL).")
-	}
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, b.statusURL, nil)
+	status, body, err := b.callAPI(context.Background(), http.MethodGet, fmt.Sprintf("/status?chat_id=%d", c.Chat().ID), nil)
 	if err != nil {
-		return c.Send(fmt.Sprintf("⚠️ Не удалось получить статус: %s", err))
+		b.logger.Error("status call failed", "chat_id", c.Chat().ID, "error", err)
 	}
-	resp, err := b.httpClient.Do(req)
-	if err != nil {
-		return c.Send(fmt.Sprintf("⚠️ Не удалось получить статус: %s", err))
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusOK {
-		return c.Send(fmt.Sprintf("⚠️ Не удалось получить статус: сервер бэкенда вернул %d", resp.StatusCode))
-	}
-	var s backendStatus
-	if err := json.NewDecoder(resp.Body).Decode(&s); err != nil {
-		return c.Send(fmt.Sprintf("⚠️ Не удалось разобрать статус: %s", err))
-	}
-	return c.Send(formatStatus(s))
+	return c.Send(statusReplyText(status, body, err))
 }
 
-func formatStatus(s backendStatus) string {
-	msg := fmt.Sprintf("Состояние: %s\nПоследняя проверка: %s", s.State, formatTime(s.LastCheck))
+// callAPI sends body (if non-nil) as JSON to path on the backend, with the
+// shared secret header, and returns the response status code and raw body.
+func (b *Bot) callAPI(ctx context.Context, method, path string, body any) (int, []byte, error) {
+	var reader io.Reader
+	if body != nil {
+		data, err := json.Marshal(body)
+		if err != nil {
+			return 0, nil, err
+		}
+		reader = bytes.NewReader(data)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, b.apiBaseURL+path, reader)
+	if err != nil {
+		return 0, nil, err
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	req.Header.Set("X-Webhook-Secret", b.secret)
+
+	resp, err := b.httpClient.Do(req)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return resp.StatusCode, nil, err
+	}
+	return resp.StatusCode, data, nil
+}
+
+func subscribeReplyText(status int, body []byte, err error, url string) string {
+	if err != nil {
+		return "⚠️ Не удалось оформить подписку, попробуйте позже."
+	}
+	switch status {
+	case http.StatusOK:
+		return "Вы подписались на уведомления о доступности записи:\n" + url
+	case http.StatusBadRequest:
+		return "⚠️ Эта ссылка не поддерживается. Подписаться можно только на страницы sport.mos.ru."
+	case http.StatusTooManyRequests:
+		return "⚠️ " + fallback(errorMessage(body), "превышен лимит подписок, попробуйте позже")
+	default:
+		return "⚠️ Не удалось оформить подписку, попробуйте позже."
+	}
+}
+
+func unsubscribeReplyText(status int, err error, url string) string {
+	if err != nil {
+		return "⚠️ Не удалось отменить подписку, попробуйте позже."
+	}
+	switch status {
+	case http.StatusOK:
+		return "Вы отписались от уведомлений:\n" + url
+	case http.StatusNotFound:
+		return "Вы не были подписаны на эту ссылку."
+	case http.StatusBadRequest:
+		return "⚠️ Эта ссылка не поддерживается. Подписаться можно только на страницы sport.mos.ru."
+	default:
+		return "⚠️ Не удалось отменить подписку, попробуйте позже."
+	}
+}
+
+func listReplyText(status int, body []byte, err error) string {
+	if err != nil || status != http.StatusOK {
+		return "⚠️ Не удалось получить список подписок, попробуйте позже."
+	}
+	var resp subscriptionsResponse
+	if jsonErr := json.Unmarshal(body, &resp); jsonErr != nil {
+		return "⚠️ Не удалось разобрать ответ бэкенда."
+	}
+	if len(resp.URLs) == 0 {
+		return "У вас нет активных подписок. Используйте /subscribe <url>, чтобы подписаться."
+	}
+	return "Ваши подписки:\n• " + strings.Join(resp.URLs, "\n• ")
+}
+
+func statusReplyText(status int, body []byte, err error) string {
+	if err != nil || status != http.StatusOK {
+		return "⚠️ Не удалось получить статус, попробуйте позже."
+	}
+	var resp statusResponse
+	if jsonErr := json.Unmarshal(body, &resp); jsonErr != nil {
+		return "⚠️ Не удалось разобрать ответ бэкенда."
+	}
+	if len(resp.Statuses) == 0 {
+		return "У вас нет активных подписок."
+	}
+	blocks := make([]string, 0, len(resp.Statuses))
+	for _, s := range resp.Statuses {
+		blocks = append(blocks, formatOneStatus(s))
+	}
+	return strings.Join(blocks, "\n\n")
+}
+
+func formatOneStatus(s backendStatus) string {
+	msg := fmt.Sprintf("%s\nСостояние: %s\nПоследняя проверка: %s", s.URL, s.State, formatTime(s.LastCheck))
 	if !s.LastChange.IsZero() {
 		msg += fmt.Sprintf("\nПоследнее изменение: %s", formatTime(s.LastChange))
 	}
@@ -145,4 +268,19 @@ func formatTime(t time.Time) string {
 		return "—"
 	}
 	return t.Local().Format("2006-01-02 15:04:05")
+}
+
+func errorMessage(body []byte) string {
+	var resp errorResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return ""
+	}
+	return resp.Error
+}
+
+func fallback(s, def string) string {
+	if s == "" {
+		return def
+	}
+	return s
 }

@@ -13,12 +13,14 @@ import (
 )
 
 type fakeBroadcaster struct {
-	calls  []string
-	result telegram.BroadcastResult
+	calls   []string
+	chatIDs [][]int64
+	result  telegram.BroadcastResult
 }
 
-func (f *fakeBroadcaster) Broadcast(_ context.Context, text string) telegram.BroadcastResult {
+func (f *fakeBroadcaster) SendTo(_ context.Context, chatIDs []int64, text string) telegram.BroadcastResult {
 	f.calls = append(f.calls, text)
+	f.chatIDs = append(f.chatIDs, chatIDs)
 	return f.result
 }
 
@@ -58,7 +60,7 @@ func TestNotifyRejectsMalformedBody(t *testing.T) {
 
 func TestNotifyBroadcastsOnAvailable(t *testing.T) {
 	h, fb := newTestHandler("correct-secret")
-	body := `{"available":true,"checked_at":"2026-08-25T00:00:00Z","url":"https://sport.mos.ru/sections/11716"}`
+	body := `{"available":true,"checked_at":"2026-08-25T00:00:00Z","url":"https://sport.mos.ru/sections/11716","chat_ids":[100,200]}`
 	req := httptest.NewRequest(http.MethodPost, "/webhook/notify", strings.NewReader(body))
 	req.Header.Set("X-Webhook-Secret", "correct-secret")
 	rec := httptest.NewRecorder()
@@ -72,11 +74,29 @@ func TestNotifyBroadcastsOnAvailable(t *testing.T) {
 	if !strings.Contains(fb.calls[0], "sport.mos.ru/sections/11716") {
 		t.Fatalf("broadcast text = %q, want it to contain the URL", fb.calls[0])
 	}
+	if len(fb.chatIDs[0]) != 2 || fb.chatIDs[0][0] != 100 || fb.chatIDs[0][1] != 200 {
+		t.Fatalf("chatIDs = %v, want [100 200]", fb.chatIDs[0])
+	}
 }
 
 func TestNotifySkipsBroadcastWhenUnavailable(t *testing.T) {
 	h, fb := newTestHandler("correct-secret")
-	body := `{"available":false}`
+	body := `{"available":false,"chat_ids":[100]}`
+	req := httptest.NewRequest(http.MethodPost, "/webhook/notify", strings.NewReader(body))
+	req.Header.Set("X-Webhook-Secret", "correct-secret")
+	rec := httptest.NewRecorder()
+	h.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204", rec.Code)
+	}
+	if len(fb.calls) != 0 {
+		t.Fatalf("broadcaster called %d times, want 0", len(fb.calls))
+	}
+}
+
+func TestNotifySkipsBroadcastWhenNoChatIDs(t *testing.T) {
+	h, fb := newTestHandler("correct-secret")
+	body := `{"available":true,"checked_at":"2026-08-25T00:00:00Z","url":"https://sport.mos.ru/sections/11716","chat_ids":[]}`
 	req := httptest.NewRequest(http.MethodPost, "/webhook/notify", strings.NewReader(body))
 	req.Header.Set("X-Webhook-Secret", "correct-secret")
 	rec := httptest.NewRecorder()

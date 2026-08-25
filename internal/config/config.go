@@ -11,8 +11,7 @@ type Config struct {
 	TelegramBotToken string
 	WebhookSecret    string
 	ListenAddr       string
-	SubscribersFile  string
-	BackendStatusURL string
+	BackendAPIURL    string
 	RequestTimeout   time.Duration
 }
 
@@ -21,8 +20,7 @@ func Load() (Config, error) {
 		TelegramBotToken: get("TELEGRAM_BOT_TOKEN", ""),
 		WebhookSecret:    get("WEBHOOK_SECRET", ""),
 		ListenAddr:       get("LISTEN_ADDR", ":8088"),
-		SubscribersFile:  get("SUBSCRIBERS_FILE", "/data/subscribers.json"),
-		BackendStatusURL: get("BACKEND_STATUS_URL", ""),
+		BackendAPIURL:    get("BACKEND_API_URL", ""),
 		RequestTimeout:   duration("REQUEST_TIMEOUT", 10*time.Second),
 	}
 	if cfg.TelegramBotToken == "" {
@@ -30,6 +28,9 @@ func Load() (Config, error) {
 	}
 	if cfg.WebhookSecret == "" {
 		return Config{}, fmt.Errorf("WEBHOOK_SECRET is required")
+	}
+	if cfg.BackendAPIURL == "" {
+		return Config{}, fmt.Errorf("BACKEND_API_URL is required")
 	}
 	return cfg, nil
 }

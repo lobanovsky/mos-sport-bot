@@ -10,8 +10,6 @@ services:
       - .env
     ports:
       - "8088:8088"
-    volumes:
-      - ./data:/data
     logging:
       driver: json-file
       options:

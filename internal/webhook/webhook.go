@@ -21,10 +21,11 @@ type notification struct {
 	URL           string    `json:"url"`
 	ActiveButtons int       `json:"active_buttons"`
 	Buttons       []string  `json:"buttons"`
+	ChatIDs       []int64   `json:"chat_ids"`
 }
 
 type Broadcaster interface {
-	Broadcast(ctx context.Context, text string) telegram.BroadcastResult
+	SendTo(ctx context.Context, chatIDs []int64, text string) telegram.BroadcastResult
 }
 
 type Handler struct {
@@ -63,14 +64,14 @@ func (h *Handler) notify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !n.Available {
+	if !n.Available || len(n.ChatIDs) == 0 {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 
 	text := fmt.Sprintf("🎾 Появилась запись!\nПроверено: %s\n%s", n.CheckedAt.Local().Format("2006-01-02 15:04:05"), n.URL)
-	result := h.broadcaster.Broadcast(r.Context(), text)
-	h.logger.Info("notification broadcast", "sent", result.Sent, "failed", result.Failed)
+	result := h.broadcaster.SendTo(r.Context(), n.ChatIDs, text)
+	h.logger.Info("notification broadcast", "url", n.URL, "sent", result.Sent, "failed", result.Failed)
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]int{"sent": result.Sent, "failed": result.Failed})

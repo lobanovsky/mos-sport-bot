@@ -97,7 +97,7 @@ jobs:
           TAG: ${{ needs.publish.outputs.tag }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
-          BACKEND_STATUS_URL: ${{ secrets.BACKEND_STATUS_URL }}
+          BACKEND_API_URL: ${{ secrets.BACKEND_API_URL }}
         run: |
           cat > .env.deploy <<EOF
           DOCKER_USERNAME=$DOCKER_USERNAME
@@ -105,8 +105,7 @@ jobs:
           TELEGRAM_BOT_TOKEN=$TELEGRAM_BOT_TOKEN
           WEBHOOK_SECRET=$WEBHOOK_SECRET
           LISTEN_ADDR=:8088
-          SUBSCRIBERS_FILE=/data/subscribers.json
-          BACKEND_STATUS_URL=$BACKEND_STATUS_URL
+          BACKEND_API_URL=$BACKEND_API_URL
           REQUEST_TIMEOUT=10s
           EOF
           cp docker-compose.yml docker-compose.yml.deploy
@@ -130,8 +129,6 @@ jobs:
             set -u
             cd "${{ secrets.DEPLOY_HOST_PROJECT_PATH }}"
             echo "${{ secrets.DOCKER_TOKEN }}" | docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
-
-            mkdir -p data
 
             had_previous=false
             if [ -f .env ] && [ -f docker-compose.yml ]; then

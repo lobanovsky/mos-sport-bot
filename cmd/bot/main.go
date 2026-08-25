@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"mos-sport-bot/internal/config"
-	"mos-sport-bot/internal/store"
 	"mos-sport-bot/internal/telegram"
 	"mos-sport-bot/internal/webhook"
 )
@@ -25,13 +24,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	st, err := store.New(cfg.SubscribersFile)
-	if err != nil {
-		logger.Error("store init failed", "error", err)
-		os.Exit(1)
-	}
-
-	tb, err := telegram.New(cfg.TelegramBotToken, st, cfg.BackendStatusURL, cfg.RequestTimeout, logger)
+	tb, err := telegram.New(cfg.TelegramBotToken, cfg.BackendAPIURL, cfg.WebhookSecret, cfg.RequestTimeout, logger)
 	if err != nil {
 		logger.Error("telegram init failed", "error", err)
 		os.Exit(1)
