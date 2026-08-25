@@ -80,7 +80,7 @@ jobs:
           cache-to: type=gha,mode=max
 
   deploy:
-    name: Deploy to Ubuntu server
+    name: Deploy to qLibin server
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     needs: publish
     runs-on: ubuntu-latest
