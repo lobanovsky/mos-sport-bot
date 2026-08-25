@@ -1,0 +1,19 @@
+name: mos-sport-bot
+
+services:
+  bot:
+    build: .
+    image: ${DOCKER_USERNAME}/mos-sport-bot:${TAG}
+    container_name: mos-sport-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "8088:8088"
+    volumes:
+      - ./data:/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "1"

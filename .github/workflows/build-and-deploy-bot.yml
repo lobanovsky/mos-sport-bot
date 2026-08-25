@@ -1,0 +1,185 @@
+name: Bot CI/CD
+
+on:
+  pull_request:
+    branches:
+      - master
+  push:
+    branches:
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  IMAGE_NAME: mos-sport-bot
+
+jobs:
+  test:
+    name: Test and build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Check formatting
+        run: test -z "$(gofmt -l .)"
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test -race ./...
+
+      - name: Build
+        run: go build ./cmd/bot
+
+  publish:
+    name: Build and publish image
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    needs: test
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.image.outputs.tag }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set image tag
+        id: image
+        run: echo "tag=sha-${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build and push
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          build-args: |
+            VERSION=${{ github.sha }}
+          tags: |
+            ${{ secrets.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}:${{ steps.image.outputs.tag }}
+            ${{ secrets.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    name: Deploy to Ubuntu server
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    needs: publish
+    runs-on: ubuntu-latest
+    concurrency:
+      group: mos-sport-bot-production
+      cancel-in-progress: false
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Prepare deployment files
+        env:
+          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+          TAG: ${{ needs.publish.outputs.tag }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+          BACKEND_STATUS_URL: ${{ secrets.BACKEND_STATUS_URL }}
+        run: |
+          cat > .env.deploy <<EOF
+          DOCKER_USERNAME=$DOCKER_USERNAME
+          TAG=$TAG
+          TELEGRAM_BOT_TOKEN=$TELEGRAM_BOT_TOKEN
+          WEBHOOK_SECRET=$WEBHOOK_SECRET
+          LISTEN_ADDR=:8088
+          SUBSCRIBERS_FILE=/data/subscribers.json
+          BACKEND_STATUS_URL=$BACKEND_STATUS_URL
+          REQUEST_TIMEOUT=10s
+          EOF
+          cp docker-compose.yml docker-compose.yml.deploy
+
+      - name: Copy deployment files
+        uses: appleboy/scp-action@v1
+        with:
+          host: ${{ secrets.DEPLOY_HOST_IP }}
+          username: ${{ secrets.DEPLOY_HOST_USERNAME }}
+          key: ${{ secrets.DEPLOY_HOST_KEY }}
+          source: ".env.deploy,docker-compose.yml.deploy"
+          target: ${{ secrets.DEPLOY_HOST_PROJECT_PATH }}
+
+      - name: Deploy and verify
+        uses: appleboy/ssh-action@v1.2.5
+        with:
+          host: ${{ secrets.DEPLOY_HOST_IP }}
+          username: ${{ secrets.DEPLOY_HOST_USERNAME }}
+          key: ${{ secrets.DEPLOY_HOST_KEY }}
+          script: |
+            set -u
+            cd "${{ secrets.DEPLOY_HOST_PROJECT_PATH }}"
+            echo "${{ secrets.DOCKER_TOKEN }}" | docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
+
+            mkdir -p data
+
+            had_previous=false
+            if [ -f .env ] && [ -f docker-compose.yml ]; then
+              cp .env .env.rollback
+              cp docker-compose.yml docker-compose.yml.rollback
+              had_previous=true
+            fi
+
+            mv .env.deploy .env
+            mv docker-compose.yml.deploy docker-compose.yml
+
+            deployment_ok=false
+            expected_commit="${{ github.sha }}"
+            expected_image="${{ secrets.DOCKER_USERNAME }}/mos-sport-bot:sha-${{ github.sha }}"
+            health_url="http://127.0.0.1:8088/healthz"
+            if docker compose pull bot && docker compose up -d bot; then
+              attempt=1
+              while [ "$attempt" -le 30 ]; do
+                actual_image="$(docker inspect --format '{{.Config.Image}}' mos-sport-bot 2>/dev/null || true)"
+                if curl --fail --silent --show-error --max-time 5 "$health_url" >/dev/null && \
+                   [ "$actual_image" = "$expected_image" ]; then
+                  deployment_ok=true
+                  break
+                fi
+                sleep 2
+                attempt=$((attempt + 1))
+              done
+            fi
+
+            if [ "$deployment_ok" = true ]; then
+              rm -f .env.rollback docker-compose.yml.rollback
+              exit 0
+            fi
+
+            echo "Deployment health check failed; restoring previous version"
+            echo "Expected commit: $expected_commit"
+            echo "Expected image: $expected_image"
+            echo "Reported image: $(docker inspect --format '{{.Config.Image}}' mos-sport-bot 2>/dev/null || echo unavailable)"
+            echo "Health endpoint: $(curl --fail --silent --show-error --max-time 5 "$health_url" 2>&1 || echo unavailable)"
+            echo "Container state:"
+            docker compose ps
+            docker compose logs --tail 20 bot || true
+            if [ "$had_previous" = true ]; then
+              mv .env.rollback .env
+              mv docker-compose.yml.rollback docker-compose.yml
+              docker compose pull bot
+              docker compose up -d bot
+            else
+              docker compose down
+            fi
+            exit 1

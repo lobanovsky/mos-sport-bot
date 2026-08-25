@@ -1,0 +1,6 @@
+.env
+.env.deploy
+docker-compose.yml.deploy
+*.rollback
+data/
+private/
