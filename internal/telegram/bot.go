@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -16,14 +17,14 @@ import (
 
 const helpText = "Слежу за доступностью записи на секциях sport.mos.ru.\n\n" +
 	"/sub <url> — подписаться на URL\n" +
-	"/unsub <url> — отписаться от URL\n" +
-	"/list — показать мои подписки\n" +
+	"/unsub <url или номер из /list> — отписаться\n" +
+	"/list — показать мои подписки (с номерами)\n" +
 	"/status — статус по моим подпискам"
 
 var botCommands = []telebot.Command{
 	{Text: "sub", Description: "подписаться: /sub <url>"},
-	{Text: "unsub", Description: "отписаться: /unsub <url>"},
-	{Text: "list", Description: "показать мои подписки"},
+	{Text: "unsub", Description: "отписаться: /unsub <url или номер>"},
+	{Text: "list", Description: "показать мои подписки с номерами"},
 	{Text: "status", Description: "статус по моим подпискам"},
 }
 
@@ -141,14 +142,48 @@ func (b *Bot) handleSubscribe(c telebot.Context) error {
 func (b *Bot) handleUnsubscribe(c telebot.Context) error {
 	args := c.Args()
 	if len(args) != 1 {
-		return c.Send("Укажите ссылку: /unsub <url>")
+		return c.Send("Укажите ссылку или номер из /list: /unsub <url|номер>")
 	}
-	url := args[0]
+
+	url, resolveErr := b.resolveUnsubscribeTarget(context.Background(), c.Chat().ID, args[0])
+	if resolveErr != nil {
+		return c.Send(resolveErr.Error())
+	}
+
 	status, _, err := b.callAPI(context.Background(), http.MethodDelete, "/subscriptions", subscribeRequest{ChatID: c.Chat().ID, URL: url})
 	if err != nil {
 		b.logger.Error("unsubscribe call failed", "chat_id", c.Chat().ID, "url", url, "error", err)
 	}
 	return c.Send(unsubscribeReplyText(status, err, url))
+}
+
+// resolveUnsubscribeTarget turns arg into a URL to unsubscribe from. If arg
+// isn't a number, it's already a URL. If it is a number, it's a 1-based
+// index into the chat's current /list ordering (backend returns it sorted by
+// URL, so the numbering matches what the user just saw in /list, as long as
+// their subscriptions haven't changed in between).
+func (b *Bot) resolveUnsubscribeTarget(ctx context.Context, chatID int64, arg string) (string, error) {
+	n, convErr := strconv.Atoi(arg)
+	if convErr != nil {
+		return arg, nil
+	}
+
+	status, body, err := b.callAPI(ctx, http.MethodGet, fmt.Sprintf("/subscriptions?chat_id=%d", chatID), nil)
+	if err != nil || status != http.StatusOK {
+		return "", fmt.Errorf("⚠️ Не удалось получить список подписок, попробуйте позже.")
+	}
+	var resp subscriptionsResponse
+	if jsonErr := json.Unmarshal(body, &resp); jsonErr != nil {
+		return "", fmt.Errorf("⚠️ Не удалось разобрать ответ бэкенда.")
+	}
+	return urlByIndex(resp.URLs, n)
+}
+
+func urlByIndex(urls []string, n int) (string, error) {
+	if n < 1 || n > len(urls) {
+		return "", fmt.Errorf("⚠️ Нет подписки под номером %d. Посмотрите номера в /list.", n)
+	}
+	return urls[n-1], nil
 }
 
 func (b *Bot) handleList(c telebot.Context) error {
@@ -242,7 +277,11 @@ func listReplyText(status int, body []byte, err error) string {
 	if len(resp.URLs) == 0 {
 		return "У вас нет активных подписок. Используйте /sub <url>, чтобы подписаться."
 	}
-	return "Ваши подписки:\n• " + strings.Join(resp.URLs, "\n• ")
+	lines := make([]string, len(resp.URLs))
+	for i, url := range resp.URLs {
+		lines[i] = fmt.Sprintf("%d. %s", i+1, url)
+	}
+	return "Ваши подписки (для отписки: /unsub <номер>):\n" + strings.Join(lines, "\n")
 }
 
 func statusReplyText(status int, body []byte, err error) string {
@@ -264,12 +303,13 @@ func statusReplyText(status int, body []byte, err error) string {
 }
 
 func formatOneStatus(s backendStatus) string {
-	msg := fmt.Sprintf("%s\nСостояние: %s\nПоследняя проверка: %s", s.URL, s.State, formatTime(s.LastCheck))
+	icon, label := "❌", "Запись недоступна"
+	if s.State == "available" {
+		icon, label = "✅", "Запись доступна"
+	}
+	msg := fmt.Sprintf("%s\n%s %s\nПоследняя проверка: %s", s.URL, icon, label, formatTime(s.LastCheck))
 	if !s.LastChange.IsZero() {
 		msg += fmt.Sprintf("\nПоследнее изменение: %s", formatTime(s.LastChange))
-	}
-	if s.LastError != "" {
-		msg += fmt.Sprintf("\nПоследняя ошибка: %s", s.LastError)
 	}
 	return msg
 }

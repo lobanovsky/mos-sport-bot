@@ -65,13 +65,34 @@ func TestListReplyText(t *testing.T) {
 	}
 
 	nonEmpty := listReplyText(http.StatusOK, []byte(`{"chat_id":1,"urls":["`+testURL+`"]}`), nil)
-	if !strings.Contains(nonEmpty, testURL) {
-		t.Fatalf("non-empty list reply = %q, want it to contain %q", nonEmpty, testURL)
+	if !strings.Contains(nonEmpty, testURL) || !strings.Contains(nonEmpty, "1. "+testURL) {
+		t.Fatalf("non-empty list reply = %q, want a numbered entry for %q", nonEmpty, testURL)
 	}
 
 	errReply := listReplyText(0, nil, errors.New("boom"))
 	if !strings.Contains(strings.ToLower(errReply), "не удалось") {
 		t.Fatalf("error list reply = %q", errReply)
+	}
+}
+
+func TestURLByIndex(t *testing.T) {
+	urls := []string{testURL, "https://sport.mos.ru/sections/99"}
+
+	got, err := urlByIndex(urls, 1)
+	if err != nil || got != urls[0] {
+		t.Fatalf("urlByIndex(1) = %q, %v, want %q, nil", got, err, urls[0])
+	}
+
+	got, err = urlByIndex(urls, 2)
+	if err != nil || got != urls[1] {
+		t.Fatalf("urlByIndex(2) = %q, %v, want %q, nil", got, err, urls[1])
+	}
+
+	if _, err := urlByIndex(urls, 0); err == nil {
+		t.Fatal("urlByIndex(0) should error")
+	}
+	if _, err := urlByIndex(urls, 3); err == nil {
+		t.Fatal("urlByIndex(3) should error (out of range)")
 	}
 }
 
@@ -83,23 +104,34 @@ func TestStatusReplyText(t *testing.T) {
 
 	body := `{"chat_id":1,"statuses":[{"state":"available","url":"` + testURL + `","last_check":"2026-08-25T00:00:00Z"}]}`
 	nonEmpty := statusReplyText(http.StatusOK, []byte(body), nil)
-	if !strings.Contains(nonEmpty, testURL) || !strings.Contains(nonEmpty, "available") {
+	if !strings.Contains(nonEmpty, testURL) || !strings.Contains(nonEmpty, "Запись доступна") {
 		t.Fatalf("status reply = %q", nonEmpty)
 	}
 }
 
 func TestFormatOneStatus(t *testing.T) {
-	s := backendStatus{
+	available := backendStatus{
 		State:      "available",
 		URL:        testURL,
 		LastCheck:  time.Date(2026, 8, 25, 12, 0, 0, 0, time.UTC),
 		LastChange: time.Date(2026, 8, 25, 11, 0, 0, 0, time.UTC),
 		LastError:  "boom",
 	}
-	got := formatOneStatus(s)
-	for _, want := range []string{testURL, "available", "Последнее изменение", "boom"} {
+	got := formatOneStatus(available)
+	for _, want := range []string{testURL, "✅", "Запись доступна", "Последнее изменение"} {
 		if !strings.Contains(got, want) {
-			t.Fatalf("formatOneStatus() = %q, missing %q", got, want)
+			t.Fatalf("formatOneStatus(available) = %q, missing %q", got, want)
+		}
+	}
+	if strings.Contains(got, "boom") {
+		t.Fatalf("formatOneStatus(available) = %q, should not include the last error", got)
+	}
+
+	unavailable := backendStatus{State: "unavailable", URL: testURL, LastCheck: time.Date(2026, 8, 25, 12, 0, 0, 0, time.UTC)}
+	got = formatOneStatus(unavailable)
+	for _, want := range []string{"❌", "Запись недоступна"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("formatOneStatus(unavailable) = %q, missing %q", got, want)
 		}
 	}
 }
