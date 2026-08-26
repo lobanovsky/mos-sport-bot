@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -13,6 +14,7 @@ type Config struct {
 	ListenAddr       string
 	BackendAPIURL    string
 	RequestTimeout   time.Duration
+	AdminChatIDs     []int64
 }
 
 func Load() (Config, error) {
@@ -22,6 +24,7 @@ func Load() (Config, error) {
 		ListenAddr:       get("LISTEN_ADDR", ":8088"),
 		BackendAPIURL:    get("BACKEND_API_URL", ""),
 		RequestTimeout:   duration("REQUEST_TIMEOUT", 10*time.Second),
+		AdminChatIDs:     chatIDList("ADMIN_CHAT_IDS"),
 	}
 	if cfg.TelegramBotToken == "" {
 		return Config{}, fmt.Errorf("TELEGRAM_BOT_TOKEN is required")
@@ -48,4 +51,20 @@ func duration(key string, fallback time.Duration) time.Duration {
 		return v
 	}
 	return fallback
+}
+
+// chatIDList parses a comma-separated list of chat IDs (e.g. "111,-222").
+// Unparseable entries are skipped rather than failing startup.
+func chatIDList(key string) []int64 {
+	var ids []int64
+	for _, part := range strings.Split(get(key, ""), ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if id, err := strconv.ParseInt(part, 10, 64); err == nil {
+			ids = append(ids, id)
+		}
+	}
+	return ids
 }

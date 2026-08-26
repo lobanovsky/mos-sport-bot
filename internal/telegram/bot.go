@@ -34,12 +34,28 @@ type BroadcastResult struct {
 }
 
 type subscribeRequest struct {
-	ChatID int64  `json:"chat_id"`
-	URL    string `json:"url"`
+	ChatID    int64  `json:"chat_id"`
+	URL       string `json:"url"`
+	Username  string `json:"username,omitempty"`
+	FirstName string `json:"first_name,omitempty"`
+	LastName  string `json:"last_name,omitempty"`
 }
 
 type subscriptionsResponse struct {
 	URLs []string `json:"urls"`
+}
+
+type subscriberSummary struct {
+	ChatID    int64  `json:"chat_id"`
+	Username  string `json:"username"`
+	FirstName string `json:"first_name"`
+	LastName  string `json:"last_name"`
+	URLCount  int    `json:"url_count"`
+}
+
+type subscribersResponse struct {
+	Total       int                 `json:"total"`
+	Subscribers []subscriberSummary `json:"subscribers"`
 }
 
 type backendStatus struct {
@@ -66,9 +82,10 @@ type Bot struct {
 	secret     string
 	httpClient *http.Client
 	logger     *slog.Logger
+	admins     map[int64]bool
 }
 
-func New(token, apiBaseURL, secret string, requestTimeout time.Duration, logger *slog.Logger) (*Bot, error) {
+func New(token, apiBaseURL, secret string, adminChatIDs []int64, requestTimeout time.Duration, logger *slog.Logger) (*Bot, error) {
 	tb, err := telebot.NewBot(telebot.Settings{
 		Token:  token,
 		Poller: &telebot.LongPoller{Timeout: 10 * time.Second},
@@ -77,12 +94,18 @@ func New(token, apiBaseURL, secret string, requestTimeout time.Duration, logger 
 		return nil, err
 	}
 
+	admins := make(map[int64]bool, len(adminChatIDs))
+	for _, id := range adminChatIDs {
+		admins[id] = true
+	}
+
 	b := &Bot{
 		bot:        tb,
 		apiBaseURL: strings.TrimRight(apiBaseURL, "/"),
 		secret:     secret,
 		httpClient: &http.Client{Timeout: requestTimeout},
 		logger:     logger,
+		admins:     admins,
 	}
 
 	tb.Handle("/start", b.handleStart)
@@ -90,6 +113,7 @@ func New(token, apiBaseURL, secret string, requestTimeout time.Duration, logger 
 	tb.Handle("/unsub", b.handleUnsubscribe)
 	tb.Handle("/list", b.handleList)
 	tb.Handle("/status", b.handleStatus)
+	tb.Handle("/subscribers", b.handleSubscribers)
 
 	if err := tb.SetCommands(botCommands); err != nil {
 		logger.Warn("setting bot command menu failed", "error", err)
@@ -132,9 +156,11 @@ func (b *Bot) handleSubscribe(c telebot.Context) error {
 		return c.Send("Укажите ссылку: /sub <url>")
 	}
 	url := args[0]
-	status, body, err := b.callAPI(context.Background(), http.MethodPost, "/subscriptions", subscribeRequest{ChatID: c.Chat().ID, URL: url})
+	chat := c.Chat()
+	req := subscribeRequest{ChatID: chat.ID, URL: url, Username: chat.Username, FirstName: chat.FirstName, LastName: chat.LastName}
+	status, body, err := b.callAPI(context.Background(), http.MethodPost, "/subscriptions", req)
 	if err != nil {
-		b.logger.Error("subscribe call failed", "chat_id", c.Chat().ID, "url", url, "error", err)
+		b.logger.Error("subscribe call failed", "chat_id", chat.ID, "url", url, "error", err)
 	}
 	return c.Send(subscribeReplyText(status, body, err, url))
 }
@@ -192,6 +218,19 @@ func (b *Bot) handleList(c telebot.Context) error {
 		b.logger.Error("list call failed", "chat_id", c.Chat().ID, "error", err)
 	}
 	return c.Send(listReplyText(status, body, err))
+}
+
+// handleSubscribers is admin-only: reports how many chats are subscribed and
+// (when known) their Telegram display names, for the bot operator's own use.
+func (b *Bot) handleSubscribers(c telebot.Context) error {
+	if !b.admins[c.Chat().ID] {
+		return c.Send("Эта команда доступна только администратору бота.")
+	}
+	status, body, err := b.callAPI(context.Background(), http.MethodGet, "/admin/subscribers", nil)
+	if err != nil {
+		b.logger.Error("subscribers call failed", "chat_id", c.Chat().ID, "error", err)
+	}
+	return c.Send(subscribersReplyText(status, body, err))
 }
 
 func (b *Bot) handleStatus(c telebot.Context) error {
@@ -300,6 +339,39 @@ func statusReplyText(status int, body []byte, err error) string {
 		blocks = append(blocks, formatOneStatus(s))
 	}
 	return strings.Join(blocks, "\n\n")
+}
+
+func subscribersReplyText(status int, body []byte, err error) string {
+	if err != nil || status != http.StatusOK {
+		return "⚠️ Не удалось получить список подписчиков, попробуйте позже."
+	}
+	var resp subscribersResponse
+	if jsonErr := json.Unmarshal(body, &resp); jsonErr != nil {
+		return "⚠️ Не удалось разобрать ответ бэкенда."
+	}
+	if resp.Total == 0 {
+		return "Подписчиков пока нет."
+	}
+	lines := make([]string, 0, len(resp.Subscribers)+1)
+	lines = append(lines, fmt.Sprintf("Подписчиков: %d", resp.Total))
+	for i, sub := range resp.Subscribers {
+		lines = append(lines, fmt.Sprintf("%d. %s (подписок: %d)", i+1, describeSubscriber(sub), sub.URLCount))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func describeSubscriber(s subscriberSummary) string {
+	name := strings.TrimSpace(s.FirstName + " " + s.LastName)
+	switch {
+	case s.Username != "" && name != "":
+		return fmt.Sprintf("@%s (%s)", s.Username, name)
+	case s.Username != "":
+		return "@" + s.Username
+	case name != "":
+		return name
+	default:
+		return fmt.Sprintf("chat %d", s.ChatID)
+	}
 }
 
 func formatOneStatus(s backendStatus) string {

@@ -98,6 +98,7 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
           BACKEND_API_URL: ${{ secrets.BACKEND_API_URL }}
+          ADMIN_CHAT_IDS: ${{ secrets.ADMIN_CHAT_IDS }}
         run: |
           cat > .env.deploy <<EOF
           DOCKER_USERNAME=$DOCKER_USERNAME
@@ -107,6 +108,7 @@ jobs:
           LISTEN_ADDR=:8088
           BACKEND_API_URL=$BACKEND_API_URL
           REQUEST_TIMEOUT=10s
+          ADMIN_CHAT_IDS=$ADMIN_CHAT_IDS
           EOF
           cp docker-compose.yml docker-compose.yml.deploy
 

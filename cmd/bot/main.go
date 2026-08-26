@@ -24,7 +24,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	tb, err := telegram.New(cfg.TelegramBotToken, cfg.BackendAPIURL, cfg.WebhookSecret, cfg.RequestTimeout, logger)
+	tb, err := telegram.New(cfg.TelegramBotToken, cfg.BackendAPIURL, cfg.WebhookSecret, cfg.AdminChatIDs, cfg.RequestTimeout, logger)
 	if err != nil {
 		logger.Error("telegram init failed", "error", err)
 		os.Exit(1)

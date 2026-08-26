@@ -136,6 +136,49 @@ func TestFormatOneStatus(t *testing.T) {
 	}
 }
 
+func TestSubscribersReplyText(t *testing.T) {
+	empty := subscribersReplyText(http.StatusOK, []byte(`{"total":0,"subscribers":[]}`), nil)
+	if !strings.Contains(empty, "нет") {
+		t.Fatalf("empty subscribers reply = %q", empty)
+	}
+
+	body := `{"total":2,"subscribers":[
+		{"chat_id":1,"username":"evgeny","first_name":"Evgeny","last_name":"Lobanovsky","url_count":2},
+		{"chat_id":2,"url_count":1}
+	]}`
+	got := subscribersReplyText(http.StatusOK, []byte(body), nil)
+	for _, want := range []string{"Подписчиков: 2", "@evgeny", "Evgeny Lobanovsky", "chat 2"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("subscribers reply = %q, missing %q", got, want)
+		}
+	}
+
+	errReply := subscribersReplyText(0, nil, errors.New("boom"))
+	if !strings.Contains(strings.ToLower(errReply), "не удалось") {
+		t.Fatalf("error subscribers reply = %q", errReply)
+	}
+}
+
+func TestDescribeSubscriber(t *testing.T) {
+	tests := []struct {
+		name string
+		sub  subscriberSummary
+		want string
+	}{
+		{"username and name", subscriberSummary{Username: "evgeny", FirstName: "Evgeny", LastName: "Lobanovsky"}, "@evgeny (Evgeny Lobanovsky)"},
+		{"username only", subscriberSummary{Username: "evgeny"}, "@evgeny"},
+		{"name only", subscriberSummary{FirstName: "Evgeny"}, "Evgeny"},
+		{"nothing known", subscriberSummary{ChatID: 42}, "chat 42"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := describeSubscriber(tt.sub); got != tt.want {
+				t.Fatalf("describeSubscriber(%+v) = %q, want %q", tt.sub, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestErrorMessage(t *testing.T) {
 	if got := errorMessage([]byte(`{"error":"oops"}`)); got != "oops" {
 		t.Fatalf("errorMessage = %q, want oops", got)
