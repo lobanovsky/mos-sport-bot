@@ -15,10 +15,17 @@ import (
 )
 
 const helpText = "Слежу за доступностью записи на секциях sport.mos.ru.\n\n" +
-	"/subscribe <url> — подписаться на URL\n" +
-	"/unsubscribe <url> — отписаться от URL\n" +
+	"/sub <url> — подписаться на URL\n" +
+	"/unsub <url> — отписаться от URL\n" +
 	"/list — показать мои подписки\n" +
 	"/status — статус по моим подпискам"
+
+var botCommands = []telebot.Command{
+	{Text: "sub", Description: "подписаться: /sub <url>"},
+	{Text: "unsub", Description: "отписаться: /unsub <url>"},
+	{Text: "list", Description: "показать мои подписки"},
+	{Text: "status", Description: "статус по моим подпискам"},
+}
 
 type BroadcastResult struct {
 	Sent   int
@@ -78,10 +85,14 @@ func New(token, apiBaseURL, secret string, requestTimeout time.Duration, logger 
 	}
 
 	tb.Handle("/start", b.handleStart)
-	tb.Handle("/subscribe", b.handleSubscribe)
-	tb.Handle("/unsubscribe", b.handleUnsubscribe)
+	tb.Handle("/sub", b.handleSubscribe)
+	tb.Handle("/unsub", b.handleUnsubscribe)
 	tb.Handle("/list", b.handleList)
 	tb.Handle("/status", b.handleStatus)
+
+	if err := tb.SetCommands(botCommands); err != nil {
+		logger.Warn("setting bot command menu failed", "error", err)
+	}
 
 	return b, nil
 }
@@ -117,7 +128,7 @@ func (b *Bot) handleStart(c telebot.Context) error {
 func (b *Bot) handleSubscribe(c telebot.Context) error {
 	args := c.Args()
 	if len(args) != 1 {
-		return c.Send("Укажите ссылку: /subscribe <url>")
+		return c.Send("Укажите ссылку: /sub <url>")
 	}
 	url := args[0]
 	status, body, err := b.callAPI(context.Background(), http.MethodPost, "/subscriptions", subscribeRequest{ChatID: c.Chat().ID, URL: url})
@@ -130,7 +141,7 @@ func (b *Bot) handleSubscribe(c telebot.Context) error {
 func (b *Bot) handleUnsubscribe(c telebot.Context) error {
 	args := c.Args()
 	if len(args) != 1 {
-		return c.Send("Укажите ссылку: /unsubscribe <url>")
+		return c.Send("Укажите ссылку: /unsub <url>")
 	}
 	url := args[0]
 	status, _, err := b.callAPI(context.Background(), http.MethodDelete, "/subscriptions", subscribeRequest{ChatID: c.Chat().ID, URL: url})
@@ -229,7 +240,7 @@ func listReplyText(status int, body []byte, err error) string {
 		return "⚠️ Не удалось разобрать ответ бэкенда."
 	}
 	if len(resp.URLs) == 0 {
-		return "У вас нет активных подписок. Используйте /subscribe <url>, чтобы подписаться."
+		return "У вас нет активных подписок. Используйте /sub <url>, чтобы подписаться."
 	}
 	return "Ваши подписки:\n• " + strings.Join(resp.URLs, "\n• ")
 }
