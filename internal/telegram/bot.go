@@ -28,6 +28,8 @@ var botCommands = []telebot.Command{
 	{Text: "status", Description: "статус по моим подпискам"},
 }
 
+var adminCommand = telebot.Command{Text: "subscribers", Description: "админ: подписчики и их имена"}
+
 type BroadcastResult struct {
 	Sent   int
 	Failed int
@@ -117,6 +119,15 @@ func New(token, apiBaseURL, secret string, adminChatIDs []int64, requestTimeout 
 
 	if err := tb.SetCommands(botCommands); err != nil {
 		logger.Warn("setting bot command menu failed", "error", err)
+	}
+	// Admins additionally see /subscribers in their own menu (a per-chat
+	// scope), so it stays hidden from everyone else.
+	adminCommands := append(append([]telebot.Command{}, botCommands...), adminCommand)
+	for _, id := range adminChatIDs {
+		scope := telebot.CommandScope{Type: telebot.CommandScopeChat, ChatID: id}
+		if err := tb.SetCommands(adminCommands, scope); err != nil {
+			logger.Warn("setting admin command menu failed", "chat_id", id, "error", err)
+		}
 	}
 
 	return b, nil
